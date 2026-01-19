@@ -8,9 +8,15 @@ local M = {}
 -- Default configuration
 M.config = {
     trigger = "/deal",
-    keybind = { key = "b", mods = "LEADER" },
+    keybind = { key = "b", mods = "LEADER" },  -- Set to false to disable
     config_path = nil,
     bj_path = "bj", -- Path to bj binary
+    status_bar = {
+        enabled = false,           -- Show in status bar
+        icon = "🃏",               -- Icon to display
+        color = "#9ece6a",         -- Icon color
+        position = "right",        -- "left" or "right"
+    },
 }
 
 -- Game state
@@ -48,9 +54,24 @@ end
 local function run_bj_with_state(action, state)
     local json_state = wezterm.json_encode(state)
 
-    -- Use echo to pipe state to bj
-    local cmd = string.format('echo %q | %s %s', json_state, M.config.bj_path, action)
-    local success, stdout, stderr = wezterm.run_child_process({ "bash", "-c", cmd })
+    -- Platform-specific piping
+    local is_windows = wezterm.target_triple:find("windows") ~= nil
+    local cmd
+    if is_windows then
+        -- PowerShell approach for Windows
+        cmd = string.format('powershell -Command "$input | %s %s"', M.config.bj_path, action)
+    else
+        -- Bash approach for Unix
+        cmd = string.format('echo %q | %s %s', json_state, M.config.bj_path, action)
+    end
+
+    local success, stdout, stderr
+    if is_windows then
+        success, stdout, stderr = wezterm.run_child_process({ "powershell", "-Command",
+            string.format("'%s' | %s %s", json_state:gsub("'", "''"), M.config.bj_path, action) })
+    else
+        success, stdout, stderr = wezterm.run_child_process({ "bash", "-c", cmd })
+    end
 
     if not success then
         wezterm.log_error("bj command failed: " .. (stderr or "unknown error"))
@@ -295,24 +316,52 @@ local function start_game(window, pane)
     end
 end
 
+-- Get status bar elements for integration
+function M.get_status_elements()
+    if not M.config.status_bar.enabled then
+        return {}
+    end
+
+    local elements = {
+        { Foreground = { Color = M.config.status_bar.color } },
+        { Text = M.config.status_bar.icon .. " " },
+    }
+
+    -- Show stats if game has been played
+    if stats.wins > 0 or stats.losses > 0 then
+        table.insert(elements, { Foreground = { Color = "#565f89" } })
+        table.insert(elements, { Text = string.format("%d/%d ", stats.wins, stats.wins + stats.losses) })
+    end
+
+    return elements
+end
+
 -- Apply configuration to WezTerm config
 function M.apply_to_config(config, opts)
     opts = opts or {}
 
-    -- Merge options
+    -- Deep merge options
     for k, v in pairs(opts) do
-        M.config[k] = v
+        if type(v) == "table" and type(M.config[k]) == "table" then
+            for k2, v2 in pairs(v) do
+                M.config[k][k2] = v2
+            end
+        else
+            M.config[k] = v
+        end
     end
 
-    -- Add key binding
-    config.keys = config.keys or {}
-    table.insert(config.keys, {
-        key = M.config.keybind.key,
-        mods = M.config.keybind.mods,
-        action = wezterm.action_callback(function(window, pane)
-            start_game(window, pane)
-        end),
-    })
+    -- Add key binding (if not disabled)
+    if M.config.keybind then
+        config.keys = config.keys or {}
+        table.insert(config.keys, {
+            key = M.config.keybind.key,
+            mods = M.config.keybind.mods,
+            action = wezterm.action_callback(function(window, pane)
+                start_game(window, pane)
+            end),
+        })
+    end
 
     return config
 end
@@ -334,6 +383,16 @@ function M.new_game()
     return wezterm.action_callback(function(window, pane)
         start_game(window, pane)
     end)
+end
+
+-- Get current stats
+function M.get_stats()
+    return stats
+end
+
+-- Reset stats
+function M.reset_stats()
+    stats = { wins = 0, losses = 0, pushes = 0 }
 end
 
 return M

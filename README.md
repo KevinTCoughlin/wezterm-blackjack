@@ -44,22 +44,49 @@ cargo install blackjack
 ```lua
 blackjack.apply_to_config(config, {
     trigger = "/deal",           -- Command to start game
-    keybind = { key = "b", mods = "LEADER" },
+    keybind = { key = "b", mods = "LEADER" },  -- Set to false to disable
     bj_path = "bj",              -- Path to bj binary
+    status_bar = {
+        enabled = true,          -- Show in status bar
+        icon = "🃏",             -- Icon to display
+        color = "#9ece6a",       -- Icon color
+    },
 })
 ```
 
 ### Custom Keybinding
 
 ```lua
-config.keys = {
-    -- Start blackjack with Ctrl+Shift+B
-    {
-        key = "b",
-        mods = "CTRL|SHIFT",
-        action = blackjack.new_game(),
-    },
-}
+-- Disable default keybind and use custom
+blackjack.apply_to_config(config, {
+    keybind = false,  -- Disable default Leader+b
+})
+
+-- Add your own
+table.insert(config.keys, {
+    key = "b",
+    mods = "CTRL|SHIFT",
+    action = blackjack.new_game(),
+})
+```
+
+### Status Bar Integration
+
+Add to your `update-status` handler:
+
+```lua
+wezterm.on("update-status", function(window, pane)
+    local elements = {}
+
+    -- Add blackjack status
+    for _, e in ipairs(blackjack.get_status_elements()) do
+        table.insert(elements, e)
+    end
+
+    -- Add your other status elements...
+
+    window:set_right_status(wezterm.format(elements))
+end)
 ```
 
 ## Game Display
