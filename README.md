@@ -2,6 +2,18 @@
 
 Play blackjack in your terminal with WezTerm.
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Q5Q11SKIOF)
+
+## Features
+
+- **Rich terminal UI** - Card art with Unicode box drawing and suit symbols
+- **Colored output** - Red hearts/diamonds, green wins, red losses
+- **Keyboard controls** - Quick single-key actions
+- **Status bar integration** - Optional win/loss tracking display
+- **Configurable** - Custom keybinds, triggers, and appearance
+
 ## Installation
 
 Add to your `wezterm.lua`:
@@ -21,23 +33,40 @@ Install the `bj` CLI:
 cargo install blackjack
 ```
 
+Or from source: [github.com/KevinTCoughlin/blackjack](https://github.com/KevinTCoughlin/blackjack)
+
 ## Usage
 
 - Press `Leader + b` to start a game (default keybinding)
-- Or type `/deal` in any terminal to trigger a game
+- Or type `/deal` in any terminal
 
 ### In-Game Controls
 
 | Key | Action |
 |-----|--------|
-| h | Hit |
-| s | Stand |
-| d | Double down |
-| p | Split |
-| u | Surrender |
-| y | Accept insurance |
-| n | Decline insurance / New game |
-| q | Quit |
+| `h` | Hit - draw another card |
+| `s` | Stand - keep current hand |
+| `d` | Double down |
+| `p` | Split a pair |
+| `u` | Surrender |
+| `y` | Accept insurance |
+| `n` | Decline insurance / New game |
+| `q` | Quit |
+
+## Game Display
+
+```
+┌─────────────────────────────────────────┐
+│              BLACKJACK                  │
+├─────────────────────────────────────────┤
+│  Dealer: [??] [K♥]          Value: ?   │
+│                                         │
+│  You:    [A♠] [J♦]         Value: 21   │
+│                           BLACKJACK!    │
+├─────────────────────────────────────────┤
+│  [H]it [S]tand [D]ouble [P]split [Q]uit │
+└─────────────────────────────────────────┘
+```
 
 ## Configuration
 
@@ -62,7 +91,7 @@ blackjack.apply_to_config(config, {
     keybind = false,  -- Disable default Leader+b
 })
 
--- Add your own
+-- Add your own keybind
 table.insert(config.keys, {
     key = "b",
     mods = "CTRL|SHIFT",
@@ -72,13 +101,13 @@ table.insert(config.keys, {
 
 ### Status Bar Integration
 
-Add to your `update-status` handler:
+Add to your `update-status` handler to show win/loss stats:
 
 ```lua
 wezterm.on("update-status", function(window, pane)
     local elements = {}
 
-    -- Add blackjack status
+    -- Add blackjack status (shows icon and win/loss record)
     for _, e in ipairs(blackjack.get_status_elements()) do
         table.insert(elements, e)
     end
@@ -89,30 +118,26 @@ wezterm.on("update-status", function(window, pane)
 end)
 ```
 
-## Game Display
+### API
 
-```
-┌─────────────────────────────────────────┐
-│              BLACKJACK                  │
-├─────────────────────────────────────────┤
-│  Dealer: [??] [K♥]          Value: ?   │
-│                                         │
-│  You:    [A♠] [J♦]     Value: 21       │
-│                        BLACKJACK!       │
-├─────────────────────────────────────────┤
-│  [H]it [S]tand [D]ouble [P]split [Q]uit │
-│  Wins: 5  Losses: 3  Pushes: 1          │
-└─────────────────────────────────────────┘
-```
+| Function | Description |
+|----------|-------------|
+| `apply_to_config(config, opts)` | Configure plugin with options |
+| `new_game()` | Returns action to start a new game |
+| `get_status_elements()` | Returns status bar elements |
+| `get_stats()` | Returns `{wins, losses, pushes}` |
+| `reset_stats()` | Reset win/loss statistics |
 
 ## Requirements
 
-- WezTerm with plugin support
-- `bj` CLI from [blackjack](https://github.com/KevinTCoughlin/blackjack)
+- [WezTerm](https://wezfurlong.org/wezterm/) with plugin support
+- [`bj` CLI](https://github.com/KevinTCoughlin/blackjack) - `cargo install blackjack`
 
-## Sponsor
+## Support
 
-If you find this useful, consider [sponsoring](https://github.com/sponsors/kevintcoughlin).
+If you find this useful, consider supporting development:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Q5Q11SKIOF)
 
 ## License
 
