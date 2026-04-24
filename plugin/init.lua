@@ -2,6 +2,7 @@
 -- https://github.com/KevinTCoughlin/wezterm-blackjack
 
 local wezterm = require("wezterm")
+local utils = require("shared.wezterm_utils")
 
 local M = {}
 
@@ -37,7 +38,7 @@ local function run_bj(args)
         table.insert(cmd, arg)
     end
 
-    local success, stdout, stderr = wezterm.run_child_process(cmd)
+    local success, stdout, stderr = utils.safe_run(cmd)
     if not success then
         wezterm.log_error("bj command failed: " .. (stderr or "unknown error"))
         return nil
@@ -45,34 +46,51 @@ local function run_bj(args)
 
     local ok, result = pcall(wezterm.json_parse, stdout)
     if not ok then
+        utils.log("Failed to parse bj output: " .. tostring(result), "WARN")
         return nil, stdout -- Return raw output if not JSON
     end
     return result
 end
 
--- Run bj command with state input
+-- Run bj command with state input (safe JSON passing via temp file)
 local function run_bj_with_state(action, state)
     local json_state = wezterm.json_encode(state)
-
-    -- Platform-specific piping
-    local is_windows = wezterm.target_triple:find("windows") ~= nil
-    local cmd
-    if is_windows then
-        -- PowerShell approach for Windows
-        cmd = string.format('powershell -Command "$input | %s %s"', M.config.bj_path, action)
-    else
-        -- Bash approach for Unix
-        cmd = string.format('echo %q | %s %s', json_state, M.config.bj_path, action)
+    
+    if not json_state then
+        wezterm.log_error("Failed to encode state to JSON")
+        return nil
     end
-
+    
+    -- Write JSON to temp file instead of shell escaping
+    local tmp_file = utils.get_temp_file("wezterm-bj", ".json")
+    if not utils.safe_write_file(tmp_file, json_state) then
+        wezterm.log_error("Failed to write state to temp file")
+        return nil
+    end
+    
+    -- Use array form to avoid shell injection
+    local cmd = { M.config.bj_path, action }
     local success, stdout, stderr
-    if is_windows then
-        success, stdout, stderr = wezterm.run_child_process({ "powershell", "-Command",
-            string.format("'%s' | %s %s", json_state:gsub("'", "''"), M.config.bj_path, action) })
+    
+    -- Read from file and pipe to command
+    if utils.is_windows() then
+        success, stdout, stderr = utils.safe_run({
+            "powershell", "-Command",
+            string.format("Get-Content '%s' | & '%s' %s", 
+                tmp_file:gsub("'", "''"), 
+                M.config.bj_path:gsub("'", "''"), 
+                action:gsub("'", "''"))
+        })
     else
-        success, stdout, stderr = wezterm.run_child_process({ "bash", "-c", cmd })
+        success, stdout, stderr = utils.safe_run({
+            "sh", "-c",
+            "cat " .. utils.escape_applescript(tmp_file) .. " | " .. M.config.bj_path .. " " .. action
+        })
     end
-
+    
+    -- Clean up temp file
+    os.remove(tmp_file)
+    
     if not success then
         wezterm.log_error("bj command failed: " .. (stderr or "unknown error"))
         return nil
