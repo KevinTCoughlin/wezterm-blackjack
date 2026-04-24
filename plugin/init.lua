@@ -2,7 +2,7 @@
 -- https://github.com/KevinTCoughlin/wezterm-blackjack
 
 local wezterm = require("wezterm")
-local utils = require("shared.wezterm_utils")
+local utils = require("plugin.lib")
 
 local M = {}
 
