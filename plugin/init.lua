@@ -84,7 +84,7 @@ local function run_bj_with_state(action, state)
     else
         success, stdout, stderr = utils.safe_run({
             "sh", "-c",
-            "cat " .. utils.escape_applescript(tmp_file) .. " | " .. M.config.bj_path .. " " .. action
+            "cat '" .. tmp_file:gsub("'", "'\\''") .. "' | '" .. M.config.bj_path:gsub("'", "'\\''") .. "' '" .. action:gsub("'", "'\\''") .. "'"
         })
     end
     
