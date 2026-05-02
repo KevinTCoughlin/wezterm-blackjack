@@ -68,32 +68,12 @@ local function run_bj_with_state(action, state)
         return nil
     end
     
-    -- Write JSON to temp file instead of shell escaping
-    local tmp_file = utils.get_temp_file("wezterm-bj", ".json")
-    if not utils.safe_write_file(tmp_file, json_state) then
-        wezterm.log_error("Failed to write state to temp file")
-        return nil
-    end
-    
     local success, stdout, stderr
 
-    -- Read state from file and pass via stdin.
-    -- This avoids shell parsing entirely and is compatible with newer WezTerm/GPU renderers.
-    local state_file, open_err = io.open(tmp_file, "r")
-    if not state_file then
-        wezterm.log_error("Failed to open temp state file: " .. (open_err or "unknown error"))
-        os.remove(tmp_file)
-        return nil
-    end
-    local state_input = state_file:read("*a")
-    state_file:close()
-
+    -- Pass state via stdin to avoid shell parsing/quoting.
     local argv = utils.split_args(action)
     table.insert(argv, 1, M.config.bj_path)
-    success, stdout, stderr = wezterm.run_child_process(argv, state_input)
-    
-    -- Clean up temp file
-    os.remove(tmp_file)
+    success, stdout, stderr = utils.safe_run_with_stdin(argv, json_state)
     
     if not success then
         wezterm.log_error("bj command failed: " .. (stderr or "unknown error"))
