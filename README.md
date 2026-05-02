@@ -33,6 +33,9 @@ Install the `bj` CLI:
 cargo install blackjack
 ```
 
+WezTerm note: the plugin sends game state to `bj` via stdin (no shell piping),
+which is compatible with newer WezTerm builds and avoids quoting issues.
+
 Or from source: [github.com/KevinTCoughlin/blackjack](https://github.com/KevinTCoughlin/blackjack)
 
 ## Usage

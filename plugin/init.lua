@@ -31,6 +31,13 @@ local function check_bj_installed()
     return success
 end
 
+-- Clear screen and reposition cursor.
+-- Uses CSI sequences supported across WezTerm versions.
+local function clear_and_home(pane)
+    -- 2J: clear screen, H: cursor home
+    pane:send_text("\x1b[2J\x1b[H")
+end
+
 -- Run bj command and parse JSON output
 local function run_bj(args)
     local cmd = { M.config.bj_path }
@@ -68,25 +75,22 @@ local function run_bj_with_state(action, state)
         return nil
     end
     
-    -- Use array form to avoid shell injection
-    local cmd = { M.config.bj_path, action }
     local success, stdout, stderr
-    
-    -- Read from file and pipe to command
-    if utils.is_windows() then
-        success, stdout, stderr = utils.safe_run({
-            "powershell", "-Command",
-            string.format("Get-Content '%s' | & '%s' %s", 
-                tmp_file:gsub("'", "''"), 
-                M.config.bj_path:gsub("'", "''"), 
-                action:gsub("'", "''"))
-        })
-    else
-        success, stdout, stderr = utils.safe_run({
-            "sh", "-c",
-            "cat '" .. tmp_file:gsub("'", "'\\''") .. "' | '" .. M.config.bj_path:gsub("'", "'\\''") .. "' '" .. action:gsub("'", "'\\''") .. "'"
-        })
+
+    -- Read state from file and pass via stdin.
+    -- This avoids shell parsing entirely and is compatible with newer WezTerm/GPU renderers.
+    local state_file, open_err = io.open(tmp_file, "r")
+    if not state_file then
+        wezterm.log_error("Failed to open temp state file: " .. (open_err or "unknown error"))
+        os.remove(tmp_file)
+        return nil
     end
+    local state_input = state_file:read("*a")
+    state_file:close()
+
+    local argv = utils.split_args(action)
+    table.insert(argv, 1, M.config.bj_path)
+    success, stdout, stderr = wezterm.run_child_process(argv, state_input)
     
     -- Clean up temp file
     os.remove(tmp_file)
@@ -307,7 +311,8 @@ local function handle_game_key(window, pane, key)
 
         -- Render and display
         local output = render_game(game_state)
-        pane:send_text("\x1b[2J\x1b[H" .. output .. "\r\n")
+        clear_and_home(pane)
+        pane:send_text(output .. "\r\n")
     end
 
     return game_state ~= nil
@@ -328,7 +333,8 @@ local function start_game(window, pane)
 
     if game_state then
         local output = render_game(game_state)
-        pane:send_text("\x1b[2J\x1b[H" .. output .. "\r\n")
+        clear_and_home(pane)
+        pane:send_text(output .. "\r\n")
     else
         pane:send_text("\r\nFailed to start blackjack game.\r\n")
     end

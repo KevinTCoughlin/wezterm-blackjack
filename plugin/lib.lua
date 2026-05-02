@@ -74,6 +74,52 @@ function M.is_windows()
   return wezterm.target_triple:find("windows") ~= nil
 end
 
+-- Split a command string into args.
+-- Supports simple quoting with single or double quotes and backslash escaping.
+function M.split_args(str)
+  if type(str) ~= "string" then
+    return {}
+  end
+
+  local args = {}
+  local current = {}
+  local quote = nil
+  local i = 1
+  while i <= #str do
+    local ch = str:sub(i, i)
+    if quote then
+      if ch == "\\" and i < #str then
+        i = i + 1
+        table.insert(current, str:sub(i, i))
+      elseif ch == quote then
+        quote = nil
+      else
+        table.insert(current, ch)
+      end
+    else
+      if ch == "\"" or ch == "'" then
+        quote = ch
+      elseif ch:match("%s") then
+        if #current > 0 then
+          table.insert(args, table.concat(current))
+          current = {}
+        end
+      elseif ch == "\\" and i < #str then
+        i = i + 1
+        table.insert(current, str:sub(i, i))
+      else
+        table.insert(current, ch)
+      end
+    end
+    i = i + 1
+  end
+
+  if #current > 0 then
+    table.insert(args, table.concat(current))
+  end
+  return args
+end
+
 -- Safe directory creation
 function M.mkdir_p(path)
   if not path or path == "" then
