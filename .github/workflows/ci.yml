@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+
+      - name: Run plugin tests
+        run: lua5.4 test/init_spec.lua
+
+  bj-contract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bj CLI
+        run: cargo install --git https://github.com/KevinTCoughlin/blackjack --locked --force
+
+      - name: Verify bj JSON contract
+        run: test/bj-contract.sh
