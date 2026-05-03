@@ -47,6 +47,32 @@ function M.safe_run(cmd, timeout_secs)
   return success, output, stderr
 end
 
+-- Safe command execution with stdin support.
+-- Returns: success (bool), output (string or nil), stderr (string or nil)
+function M.safe_run_with_stdin(cmd, stdin, timeout_secs)
+  if type(cmd) == "string" then
+    error("safe_run_with_stdin() requires array form: {cmd, arg1, arg2, ...} not string")
+  end
+
+  timeout_secs = timeout_secs or 5
+
+  local start_time = os.time()
+  local success, output, stderr = wezterm.run_child_process(cmd, stdin)
+  local elapsed = os.time() - start_time
+
+  if M.debug_mode then
+    M.log(string.format("safe_run_with_stdin(%s) => success=%s, elapsed=%ds",
+      table.concat(cmd, " "), success, elapsed), "DEBUG")
+  end
+
+  if elapsed > timeout_secs then
+    M.log(string.format("Command timeout: %s exceeded %ds",
+      cmd[1], timeout_secs), "WARN")
+  end
+
+  return success, output, stderr
+end
+
 -- Escape string for AppleScript (prevents injection)
 function M.escape_applescript(str)
   -- Escape backslashes and quotes
@@ -72,6 +98,59 @@ end
 
 function M.is_windows()
   return wezterm.target_triple:find("windows") ~= nil
+end
+
+-- Split a command string into args.
+-- Supports simple quoting with single or double quotes and backslash escaping.
+function M.split_args(str)
+  if type(str) ~= "string" then
+    return {}
+  end
+
+  local args = {}
+  local current = {}
+  local in_token = false
+  local quote = nil
+  local i = 1
+  while i <= #str do
+    local ch = str:sub(i, i)
+    if quote then
+      if ch == "\\" and i < #str then
+        i = i + 1
+        table.insert(current, str:sub(i, i))
+        in_token = true
+      elseif ch == quote then
+        quote = nil
+      else
+        table.insert(current, ch)
+        in_token = true
+      end
+    else
+      if ch == "\"" or ch == "'" then
+        quote = ch
+        in_token = true
+      elseif ch:match("%s") then
+        if in_token then
+          table.insert(args, table.concat(current))
+          current = {}
+          in_token = false
+        end
+      elseif ch == "\\" and i < #str then
+        i = i + 1
+        table.insert(current, str:sub(i, i))
+        in_token = true
+      else
+        table.insert(current, ch)
+        in_token = true
+      end
+    end
+    i = i + 1
+  end
+
+  if in_token then
+    table.insert(args, table.concat(current))
+  end
+  return args
 end
 
 -- Safe directory creation
