@@ -57,7 +57,8 @@ or `Escape` to leave the game and return keyboard input to the shell.
 | `p` | Split a pair |
 | `u` | Surrender |
 | `y` | Accept insurance |
-| `n` | Decline insurance / New game |
+| `n` | Decline insurance |
+| `N` | New game (finished hands) |
 | `q` | Quit |
 
 ## Game Display
@@ -198,6 +199,21 @@ and stats path.
 | `health_check()` | Returns `bj` path/version diagnostics |
 
 ## Development
+
+### Architecture
+
+The plugin is organized into focused modules:
+
+- `plugin/init.lua` - Composition root and public API
+- `plugin/domain/actions.lua` - Canonical action registry and per-phase policy
+- `plugin/domain/state.lua` - Hand scoring and strict game-state validation
+- `plugin/transport/bj.lua` - CLI transport (`bj` argv/stdin/stdout boundary)
+- `plugin/ui/render.lua` - Pure terminal UI rendering
+- `plugin/stats/store.lua` - In-memory/persisted stats management
+- `plugin/wezterm/events.lua` - WezTerm event wiring
+
+This split keeps rendering, transport, and domain logic independently testable,
+with explicit validation at the CLI boundary before state reaches UI/actions.
 
 Run the local smoke check with a WezTerm config load:
 

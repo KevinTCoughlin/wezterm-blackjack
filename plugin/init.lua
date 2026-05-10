@@ -3,13 +3,6 @@
 
 local wezterm = require("wezterm")
 
-local ok, utils = pcall(require, "plugin.lib")
-if not ok then
-    local source = debug.getinfo(1, "S").source:gsub("^@", "")
-    local plugin_dir = source:match("(.*/)") or "./"
-    utils = dofile(plugin_dir .. "lib.lua")
-end
-
 local M = {}
 
 local EVENT_ACTION = "wezterm-blackjack-action"
@@ -18,7 +11,54 @@ local EVENT_RESET_STATS = "wezterm-blackjack-reset-stats"
 local USER_VAR = "wezterm_blackjack"
 local KEY_TABLE = "wezterm_blackjack"
 
-M.config = {
+local function plugin_dir()
+    local source = debug.getinfo(1, "S").source:gsub("^@", "")
+    return source:match("(.*/)") or "./"
+end
+
+local PLUGIN_DIR = plugin_dir()
+
+local function load_module(require_name, relative_path)
+    local ok, mod = pcall(require, require_name)
+    if ok then
+        return mod
+    end
+    return dofile(PLUGIN_DIR .. relative_path)
+end
+
+local utils = load_module("plugin.lib", "lib.lua")
+local action_domain = load_module("plugin.domain.actions", "domain/actions.lua")
+local state_domain = load_module("plugin.domain.state", "domain/state.lua")
+local bj_transport = load_module("plugin.transport.bj", "transport/bj.lua")
+local ui_renderer = load_module("plugin.ui.render", "ui/render.lua")
+local stats_store_module = load_module("plugin.stats.store", "stats/store.lua")
+local wezterm_events = load_module("plugin.wezterm.events", "wezterm/events.lua")
+
+local function deep_copy(value)
+    if type(value) ~= "table" then
+        return value
+    end
+
+    local copied = {}
+    for k, v in pairs(value) do
+        copied[k] = deep_copy(v)
+    end
+    return copied
+end
+
+local function merge_tables(base, overrides)
+    local result = deep_copy(base)
+    for k, v in pairs(overrides or {}) do
+        if type(v) == "table" and type(result[k]) == "table" then
+            result[k] = merge_tables(result[k], v)
+        else
+            result[k] = deep_copy(v)
+        end
+    end
+    return result
+end
+
+local DEFAULT_CONFIG = {
     trigger = "/deal",
     keybind = { key = "b", mods = "LEADER" },
     bj_path = "bj",
@@ -49,25 +89,190 @@ M.config = {
     },
 }
 
-local pane_games = {}
-local persisted_stats = nil
-local events_registered = false
+M.config = deep_copy(DEFAULT_CONFIG)
 
-local colors = {
-    reset = "\x1b[0m",
-    dim = "\x1b[2m",
-    red = "\x1b[31m",
-    green = "\x1b[32m",
-    yellow = "\x1b[33m",
-    cyan = "\x1b[36m",
-    white = "\x1b[37m",
+local pane_games = {}
+
+local transport_deps = {
+    utils = utils,
+    state_domain = state_domain,
 }
 
-local function colorize(text, color)
-    if not M.config.colors then
-        return text
+local stats_store = stats_store_module.new({
+    wezterm = wezterm,
+    utils = utils,
+    get_config = function()
+        return M.config
+    end,
+    state_domain = state_domain,
+    encode_json = wezterm.json_encode,
+})
+
+local TOP_LEVEL_KEYS = {
+    trigger = true,
+    keybind = true,
+    bj_path = true,
+    config_path = true,
+    min_bj_version = true,
+    colors = true,
+    command_palette = true,
+    controls = true,
+    stats = true,
+    status_bar = true,
+}
+
+local CONTROL_KEYS = {}
+for _, control_name in ipairs(action_domain.control_names()) do
+    CONTROL_KEYS[control_name] = true
+end
+
+local STATS_KEYS = { persist = true, path = true }
+local STATUS_BAR_KEYS = { enabled = true, icon = true, color = true, position = true }
+local KEYBIND_KEYS = { key = true, mods = true }
+
+local function assert_known_keys(tbl, allowed, section)
+    for key in pairs(tbl or {}) do
+        if not allowed[key] then
+            error(string.format("%s has unknown key '%s'", section, tostring(key)))
+        end
     end
-    return (colors[color] or "") .. text .. colors.reset
+end
+
+local function require_non_empty_string(value, field)
+    if type(value) ~= "string" or value == "" then
+        error(field .. " must be a non-empty string")
+    end
+    return value
+end
+
+local function optional_string(value, field)
+    if value == nil then
+        return nil
+    end
+    return require_non_empty_string(value, field)
+end
+
+local function normalize_control_value(value, name)
+    if type(value) == "string" then
+        return require_non_empty_string(value, "controls." .. name)
+    end
+
+    if type(value) ~= "table" then
+        error("controls." .. name .. " must be a string or a list of strings")
+    end
+
+    local normalized = {}
+    local seen = {}
+    for i, item in ipairs(value) do
+        if type(item) ~= "string" or item == "" then
+            error(string.format("controls.%s[%d] must be a non-empty string", name, i))
+        end
+        if not seen[item] then
+            seen[item] = true
+            normalized[#normalized + 1] = item
+        end
+    end
+
+    if #normalized == 0 then
+        error("controls." .. name .. " must contain at least one key")
+    end
+    if #normalized == 1 then
+        return normalized[1]
+    end
+    return normalized
+end
+
+local function normalize_keybind(value)
+    if value == false then
+        return false
+    end
+    if value == nil then
+        return deep_copy(DEFAULT_CONFIG.keybind)
+    end
+    if type(value) ~= "table" then
+        error("keybind must be false or a table with key/mods")
+    end
+
+    assert_known_keys(value, KEYBIND_KEYS, "keybind")
+    return {
+        key = require_non_empty_string(value.key, "keybind.key"),
+        mods = require_non_empty_string(value.mods, "keybind.mods"),
+    }
+end
+
+local function normalize_stats(value)
+    if type(value) ~= "table" then
+        error("stats must be a table")
+    end
+    return {
+        persist = not not value.persist,
+        path = optional_string(value.path, "stats.path"),
+    }
+end
+
+local function normalize_status_bar(value)
+    if type(value) ~= "table" then
+        error("status_bar must be a table")
+    end
+    return {
+        enabled = not not value.enabled,
+        icon = require_non_empty_string(value.icon, "status_bar.icon"),
+        color = require_non_empty_string(value.color, "status_bar.color"),
+        position = require_non_empty_string(value.position, "status_bar.position"),
+    }
+end
+
+local function normalize_config(opts)
+    opts = opts or {}
+    assert_known_keys(opts, TOP_LEVEL_KEYS, "blackjack options")
+
+    if opts.controls ~= nil then
+        if type(opts.controls) ~= "table" then
+            error("controls must be a table")
+        end
+        assert_known_keys(opts.controls, CONTROL_KEYS, "controls")
+    end
+
+    if opts.stats ~= nil then
+        if type(opts.stats) ~= "table" then
+            error("stats must be a table")
+        end
+        assert_known_keys(opts.stats, STATS_KEYS, "stats")
+    end
+
+    if opts.status_bar ~= nil then
+        if type(opts.status_bar) ~= "table" then
+            error("status_bar must be a table")
+        end
+        assert_known_keys(opts.status_bar, STATUS_BAR_KEYS, "status_bar")
+    end
+
+    if opts.keybind ~= nil and opts.keybind ~= false then
+        if type(opts.keybind) ~= "table" then
+            error("keybind must be false or a table")
+        end
+        assert_known_keys(opts.keybind, KEYBIND_KEYS, "keybind")
+    end
+
+    local merged = merge_tables(M.config, opts)
+    local normalized = {
+        trigger = require_non_empty_string(merged.trigger, "trigger"),
+        keybind = normalize_keybind(merged.keybind),
+        bj_path = require_non_empty_string(merged.bj_path, "bj_path"),
+        config_path = optional_string(merged.config_path, "config_path"),
+        min_bj_version = require_non_empty_string(merged.min_bj_version, "min_bj_version"),
+        colors = not not merged.colors,
+        command_palette = not not merged.command_palette,
+        controls = {},
+        stats = normalize_stats(merged.stats),
+        status_bar = normalize_status_bar(merged.status_bar),
+    }
+
+    for _, control_name in ipairs(action_domain.control_names()) do
+        normalized.controls[control_name] = normalize_control_value(merged.controls[control_name], control_name)
+    end
+
+    return normalized
 end
 
 local function pane_key(pane)
@@ -82,7 +287,91 @@ local function pane_key(pane)
     return tostring(pane)
 end
 
+local function call_first_method(obj, method_names)
+    for _, method_name in ipairs(method_names) do
+        if type(obj[method_name]) == "function" then
+            local ok, result = pcall(function()
+                return obj[method_name](obj)
+            end)
+            if ok and type(result) == "table" then
+                return result
+            end
+        end
+    end
+    return nil
+end
+
+local function collect_live_pane_keys()
+    local mux = wezterm.mux
+    if type(mux) ~= "table" or type(mux.all_windows) ~= "function" then
+        return nil
+    end
+
+    local ok_windows, windows = pcall(function()
+        return mux.all_windows()
+    end)
+    if not ok_windows or type(windows) ~= "table" then
+        return nil
+    end
+
+    local live = {}
+
+    local function mark_tab_panes(tab)
+        local panes = call_first_method(tab, { "panes_with_info", "panes" })
+        if type(panes) ~= "table" then
+            return
+        end
+
+        for _, pane_info in ipairs(panes) do
+            local pane = pane_info
+            if type(pane_info) == "table" and pane_info.pane ~= nil then
+                pane = pane_info.pane
+            end
+            live[pane_key(pane)] = true
+        end
+    end
+
+    local function mark_window_panes(window)
+        local tabs = call_first_method(window, { "tabs_with_info", "tabs" })
+        if type(tabs) ~= "table" then
+            return
+        end
+
+        for _, tab_info in ipairs(tabs) do
+            local tab = tab_info
+            if type(tab_info) == "table" and tab_info.tab ~= nil then
+                tab = tab_info.tab
+            end
+            mark_tab_panes(tab)
+        end
+    end
+
+    for _, window_info in ipairs(windows) do
+        local window = window_info
+        if type(window_info) == "table" and window_info.window ~= nil then
+            window = window_info.window
+        end
+        mark_window_panes(window)
+    end
+
+    return live
+end
+
+local function prune_stale_games()
+    local live = collect_live_pane_keys()
+    if not live then
+        return
+    end
+
+    for key in pairs(pane_games) do
+        if not live[key] then
+            pane_games[key] = nil
+        end
+    end
+end
+
 local function get_game(pane)
+    prune_stale_games()
     local key = pane_key(pane)
     pane_games[key] = pane_games[key] or {
         state = nil,
@@ -93,400 +382,22 @@ local function get_game(pane)
     return pane_games[key]
 end
 
-local function default_stats_path()
-    local home = wezterm.home_dir or os.getenv("HOME") or "."
-    return home .. "/.local/state/wezterm-blackjack/stats.json"
-end
-
-local function copy_stats(stats)
-    return {
-        wins = tonumber(stats and stats.wins) or 0,
-        losses = tonumber(stats and stats.losses) or 0,
-        pushes = tonumber(stats and stats.pushes) or 0,
-    }
-end
-
-local function stats_path()
-    return M.config.stats.path or default_stats_path()
-end
-
-local function load_persisted_stats()
-    if not M.config.stats.persist then
-        persisted_stats = nil
-        return { wins = 0, losses = 0, pushes = 0 }
-    end
-    if persisted_stats then
-        return persisted_stats
-    end
-
-    local content = utils.read_file(stats_path())
-    local decoded = content and utils.safe_json_parse(content)
-    persisted_stats = copy_stats(decoded)
-    return persisted_stats
-end
-
-local function save_persisted_stats()
-    if not M.config.stats.persist then
-        return
-    end
-
-    persisted_stats = copy_stats(persisted_stats)
-    local encoded = utils.safe_json_encode(persisted_stats)
-    if encoded then
-        local ok, err = utils.write_file(stats_path(), encoded .. "\n")
-        if not ok then
-            utils.log("failed to save stats: " .. tostring(err), "WARN")
-        end
-    end
-end
-
-local function add_stats(target, delta)
-    target.wins = (target.wins or 0) + (delta.wins or 0)
-    target.losses = (target.losses or 0) + (delta.losses or 0)
-    target.pushes = (target.pushes or 0) + (delta.pushes or 0)
-end
-
 local function clear_and_home(pane)
     pane:send_text("\x1b[2J\x1b[H")
 end
 
-local function run_bj(args)
-    local cmd = { M.config.bj_path }
-    for _, arg in ipairs(args) do
-        table.insert(cmd, arg)
-    end
-    if args[1] == "new" and M.config.config_path then
-        table.insert(cmd, "--config")
-        table.insert(cmd, M.config.config_path)
-    end
-
-    local success, stdout, stderr = utils.safe_run(cmd)
-    if not success then
-        return nil, stderr or stdout or "unknown error"
-    end
-
-    local result = utils.safe_json_parse(stdout)
-    if not result then
-        return nil, "failed to parse bj JSON output"
-    end
-    return result
-end
-
-local function run_bj_with_state(action, state)
-    local json_state = utils.safe_json_encode(state)
-    if not json_state then
-        return nil, "failed to encode game state"
-    end
-
-    local argv = utils.split_args(action)
-    table.insert(argv, 1, M.config.bj_path)
-
-    local success, stdout, stderr = utils.safe_run_with_stdin(argv, json_state)
-    if not success then
-        return nil, stderr or stdout or "unknown error"
-    end
-
-    local result = utils.safe_json_parse(stdout)
-    if not result then
-        return nil, "failed to parse bj JSON output"
-    end
-    return result
-end
-
-local function hand_value(cards)
-    local value = 0
-    local aces = 0
-    local rank_values = {
-        Two = 2,
-        Three = 3,
-        Four = 4,
-        Five = 5,
-        Six = 6,
-        Seven = 7,
-        Eight = 8,
-        Nine = 9,
-        Ten = 10,
-        Jack = 10,
-        Queen = 10,
-        King = 10,
-    }
-
-    for _, card in ipairs(cards or {}) do
-        if card.rank == "Ace" then
-            aces = aces + 1
-            value = value + 11
-        else
-            value = value + (rank_values[card.rank] or 0)
-        end
-    end
-
-    while value > 21 and aces > 0 do
-        value = value - 10
-        aces = aces - 1
-    end
-
-    return value
-end
-
-local function card_text(card)
-    -- Full rank → display-label mapping for all 13 standard ranks.
-    -- Previously, Two–Nine fell through to `card.rank:sub(1, 1)`, which
-    -- produced silent collisions: Two/Three → "T", Four/Five → "F",
-    -- Six/Seven → "S". Players could not distinguish those cards on screen.
-    local ranks = {
-        Ace   = "A",
-        Two   = "2",
-        Three = "3",
-        Four  = "4",
-        Five  = "5",
-        Six   = "6",
-        Seven = "7",
-        Eight = "8",
-        Nine  = "9",
-        Ten   = "10",
-        Jack  = "J",
-        Queen = "Q",
-        King  = "K",
-    }
-    local suits = {
-        Spades   = "♠",
-        Hearts   = "♥",
-        Diamonds = "♦",
-        Clubs    = "♣",
-    }
-
-    -- Fall back to the raw rank string so unknown engine values are visible
-    -- rather than silently truncated.
-    local rank = ranks[card.rank] or card.rank
-    return rank .. (suits[card.suit] or "?")
-end
-
-local function render_card(card)
-    if card == "??" then
-        return colorize("[??]", "dim")
-    end
-
-    local text = card_text(card)
-    local suit_color = (card.suit == "Hearts" or card.suit == "Diamonds") and "red" or "white"
-    return colorize("[" .. text .. "]", suit_color)
-end
-
-local function render_hand(cards)
-    local rendered = {}
-    for _, card in ipairs(cards or {}) do
-        table.insert(rendered, render_card(card))
-    end
-    return table.concat(rendered, " ")
-end
-
--- Count the number of terminal display columns occupied by `text`.
---
--- Strips ANSI SGR escape sequences first, then counts Unicode codepoints.
--- Every codepoint is assumed to occupy exactly one column, which is correct
--- for the card suit symbols (♠ ♥ ♦ ♣, all in the BMP, all narrow-width).
--- This avoids the classic Lua pitfall where `#s` counts UTF-8 *bytes*, not
--- characters — suit symbols are 3 bytes each, so a multi-card hand would
--- otherwise produce a gap that is N×2 columns too small.
-local function display_len(text)
-    -- Remove every ANSI CSI SGR sequence (ESC [ … m).
-    local plain = text:gsub("\x1b%[[0-9;]*m", "")
-    -- Count codepoints: each leading byte of a UTF-8 sequence matches
-    -- 0xxxxxxx (ASCII) or 11xxxxxx (multi-byte lead). Continuation bytes
-    -- (10xxxxxx) are skipped by the negated character class.
-    local _, count = plain:gsub("[^\x80-\xBF]", "")
-    return count
-end
-
-local function fit(text, width)
-    local len = display_len(text)
-    if len == width then
-        return text
-    end
-    if len < width then
-        return text .. string.rep(" ", width - len)
-    end
-
-    local plain = text:gsub("\x1b%[[0-9;]*m", "")
-    return plain:sub(1, math.max(0, width - 1)) .. "…"
-end
-
-local function right(text, width)
-    local len = display_len(text)
-    if len >= width then
-        return fit(text, width)
-    end
-    return string.rep(" ", width - len) .. text
-end
-
-local function row(left, right_text)
-    local content_width = 57
-    right_text = right_text or ""
-    local gap = content_width - display_len(left) - display_len(right_text)
-    if gap < 1 then
-        return "│ " .. fit(left .. " " .. right_text, content_width) .. " │"
-    end
-    return "│ " .. left .. string.rep(" ", gap) .. right_text .. " │"
-end
-
-local function outcome_color(outcome)
-    if outcome == "Win" or outcome == "Blackjack" then
-        return "green"
-    end
-    if outcome == "Lose" or outcome == "Bust" then
-        return "red"
-    end
-    return "yellow"
-end
-
-local function first_present(state, keys)
-    for _, key in ipairs(keys) do
-        local value = state[key]
-        if value ~= nil then
-            return value
-        end
-    end
-    return nil
-end
-
-local function render_table_fields(label, fields)
-    local parts = {}
-    for _, field in ipairs(fields) do
-        if field.value ~= nil then
-            table.insert(parts, field.label .. ": " .. tostring(field.value))
-        end
-    end
-    if #parts == 0 then
-        return nil
-    end
-    return label .. "  " .. table.concat(parts, "  ")
-end
-
-local function control_value(name)
-    return M.config.controls[name]
-end
-
-local function primary_control(name)
-    local value = control_value(name)
-    if type(value) == "table" then
-        return value[1]
-    end
-    return value
-end
-
-local function control_label(name, label)
-    local key = primary_control(name)
-    if not key then
-        return label
-    end
-    local display_key = (#key == 1) and key:upper() or key
-    return "[" .. display_key .. "]" .. label
-end
-
 local function render_game(game)
-    local state = game.state
-    local stats = game.stats
-    local lines = {}
-
-    table.insert(lines, "┌───────────────────────────────────────────────────────────┐")
-    table.insert(lines, row(colorize("BLACKJACK", "cyan"), colorize("modal keys active", "dim")))
-    table.insert(lines, "├───────────────────────────────────────────────────────────┤")
-
-    local table_info = render_table_fields("Table", {
-        { label = "Bankroll", value = first_present(state, { "bankroll", "balance", "chips" }) },
-        { label = "Bet", value = first_present(state, { "bet", "wager", "current_bet" }) },
+    return ui_renderer.render_game(game, {
+        actions = action_domain,
+        state_domain = state_domain,
+        controls = M.config.controls,
+        colors_enabled = M.config.colors,
     })
-    if table_info then
-        table.insert(lines, row(table_info))
-        table.insert(lines, row(""))
-    end
+end
 
-    local dealer_cards = state.dealer_hand.cards or {}
-    local show_dealer = state.phase.type == "Finished" or state.phase.type == "DealerTurn"
-    local dealer_display = ""
-    local dealer_value = "Value: ?"
-
-    if show_dealer then
-        dealer_display = render_hand(dealer_cards)
-        dealer_value = "Value: " .. hand_value(dealer_cards)
-    elseif #dealer_cards >= 2 then
-        dealer_display = render_card("??") .. " " .. render_card(dealer_cards[2])
-    end
-
-    table.insert(lines, row("Dealer: " .. dealer_display, dealer_value))
-    table.insert(lines, row(""))
-
-    for i, hand in ipairs(state.player_hands or {}) do
-        local cards = hand.cards or {}
-        local active = state.phase.type == "PlayerTurn" and state.phase.data == i - 1
-        local label = #state.player_hands > 1 and ("Hand " .. i .. ": ") or "You:    "
-        local value = hand_value(cards)
-        local status
-
-        if value == 21 and #cards == 2 then
-            status = colorize("BLACKJACK!", "green")
-        elseif value > 21 then
-            status = colorize("BUST!", "red")
-        else
-            status = "Value: " .. value
-            if active then
-                status = colorize(status .. " <", "cyan")
-            end
-        end
-
-        table.insert(lines, row(label .. render_hand(cards), status))
-    end
-
-    table.insert(lines, "├───────────────────────────────────────────────────────────┤")
-
-    if state.phase.type == "Finished" then
-        for _, outcome in ipairs(state.outcomes or {}) do
-            local payout = outcome.payout or 0
-            local payout_str = payout >= 0 and ("+" .. payout .. "x") or (payout .. "x")
-            table.insert(lines, row(colorize(outcome.outcome or "Finished", outcome_color(outcome.outcome)), payout_str))
-        end
-        table.insert(lines, row(colorize(control_label("new_game", "ew game"), "cyan") .. "  " .. control_label("quit", "uit")))
-    elseif state.phase.type == "Insurance" then
-        table.insert(
-            lines,
-            row(
-                control_label("insurance_accept", "es insurance")
-                    .. "  "
-                    .. control_label("insurance_decline", "o insurance")
-                    .. "  "
-                    .. control_label("quit", "uit")
-            )
-        )
-    else
-        table.insert(
-            lines,
-            row(
-                control_label("hit", "it")
-                    .. "  "
-                    .. control_label("stand", "tand")
-                    .. "  "
-                    .. control_label("double", "ouble")
-                    .. "  "
-                    .. control_label("split", "split")
-                    .. "  "
-                    .. control_label("surrender", "surrender")
-                    .. "  "
-                    .. control_label("quit", "uit")
-            )
-        )
-    end
-
-    if state.insurance_bet then
-        table.insert(lines, row(colorize("Insurance accepted", "yellow")))
-    end
-
-    if game.message then
-        table.insert(lines, row(colorize(game.message, "yellow")))
-    end
-
-    table.insert(lines, row(string.format("Wins: %d  Losses: %d  Pushes: %d", stats.wins, stats.losses, stats.pushes)))
-    table.insert(lines, "└───────────────────────────────────────────────────────────┘")
-
-    return table.concat(lines, "\r\n")
+local function render_to_pane(game, pane)
+    clear_and_home(pane)
+    pane:send_text(render_game(game) .. "\r\n")
 end
 
 local function activate_key_table(window, pane)
@@ -504,47 +415,9 @@ local function pop_key_table(window, pane)
     window:perform_action(wezterm.action.PopKeyTable, pane)
 end
 
-local function render_to_pane(game, pane)
-    clear_and_home(pane)
-    pane:send_text(render_game(game) .. "\r\n")
-end
-
-local function settlement_signature(state)
-    if not state or state.phase.type ~= "Finished" then
-        return nil
-    end
-    return wezterm.json_encode(state.outcomes or {})
-end
-
-local function record_finished_stats(game)
-    local signature = settlement_signature(game.state)
-    if not signature or signature == game.settled_signature then
-        return
-    end
-
-    local delta = { wins = 0, losses = 0, pushes = 0 }
-    for _, outcome in ipairs(game.state.outcomes or {}) do
-        if outcome.outcome == "Win" or outcome.outcome == "Blackjack" then
-            delta.wins = delta.wins + 1
-        elseif outcome.outcome == "Lose" or outcome.outcome == "Bust" then
-            delta.losses = delta.losses + 1
-        elseif outcome.outcome == "Push" then
-            delta.pushes = delta.pushes + 1
-        end
-    end
-
-    add_stats(game.stats, delta)
-    if M.config.stats.persist then
-        add_stats(load_persisted_stats(), delta)
-        save_persisted_stats()
-    end
-
-    game.settled_signature = signature
-end
-
 local function start_game(window, pane)
     local game = get_game(pane)
-    local state, err = run_bj({ "new" })
+    local state, err = bj_transport.run_new(M.config, transport_deps)
     if not state then
         pane:send_text("\r\nBlackjack failed to start using '" .. M.config.bj_path .. "'.\r\n")
         pane:send_text("Install with: cargo install blackjack\r\n")
@@ -557,70 +430,16 @@ local function start_game(window, pane)
     game.state = state
     game.settled_signature = nil
     game.message = nil
-    record_finished_stats(game)
+    stats_store.record_finished_stats(game)
     render_to_pane(game, pane)
     activate_key_table(window, pane)
 end
 
-local function apply_action(window, pane, action)
-    local game = get_game(pane)
-    if not game.state and action ~= "new" then
-        return
-    end
+local apply_action
 
-    if action == "quit" then
-        game.state = nil
-        game.settled_signature = nil
-        pop_key_table(window, pane)
-        pane:send_text("\r\nBlackjack closed.\r\n")
-        return
-    end
-
-    local next_state
-    local err
-
-    if action == "new" then
-        next_state, err = run_bj({ "new" })
-    elseif action == "insurance-accept" then
-        next_state, err = run_bj_with_state("insurance --accept", game.state)
-    elseif action == "insurance-decline" then
-        if game.state.phase.type == "Insurance" then
-            next_state, err = run_bj_with_state("insurance", game.state)
-        else
-            -- The decline key ("n") was pressed outside of an Insurance phase.
-            -- Previously this silently called run_bj({"new"}), discarding the
-            -- active hand with no confirmation. Do nothing instead — the key is
-            -- simply irrelevant in any other phase.
-            return
-        end
-    else
-        next_state, err = run_bj_with_state(action, game.state)
-    end
-
-    if not next_state then
-        game.message = "Action unavailable: " .. (err or action)
-        render_to_pane(game, pane)
-        return
-    end
-
-    -- Reset the duplicate-prevention sentinel before scoring the new state.
-    -- This mirrors the explicit reset in start_game and ensures that two
-    -- consecutive games with identical outcome signatures (e.g., back-to-back
-    -- dealer/player blackjacks) both get their stats recorded rather than the
-    -- second one being silently dropped.
-    if action == "new" then
-        game.settled_signature = nil
-    end
-
-    game.state = next_state
-    game.message = nil
-    record_finished_stats(game)
-    render_to_pane(game, pane)
-end
-
-local function key_action(action)
+local function key_action(action_id)
     return wezterm.action_callback(function(window, pane)
-        apply_action(window, pane, action)
+        apply_action(window, pane, action_id)
     end)
 end
 
@@ -642,32 +461,23 @@ local function collect_control_keys(value, callback)
 end
 
 local function build_key_table()
-    local table_entries = {}
+    local entries = {}
     local reserved = { Escape = true }
     local assigned = {}
-    local actions = {
-        hit = "hit",
-        stand = "stand",
-        double = "double",
-        split = "split",
-        surrender = "surrender",
-        insurance_accept = "insurance-accept",
-        insurance_decline = "insurance-decline",
-        new_game = "new",
-        quit = "quit",
-    }
 
-    for control in pairs(actions) do
-        collect_control_keys(M.config.controls[control], function(key)
+    for _, action_id in ipairs(action_domain.ordered_ids()) do
+        local action = action_domain.get(action_id)
+        collect_control_keys(M.config.controls[action.control], function(key)
             reserved[key] = true
         end)
     end
 
-    for control, action in pairs(actions) do
-        collect_control_keys(M.config.controls[control], function(key)
+    for _, action_id in ipairs(action_domain.ordered_ids()) do
+        local action = action_domain.get(action_id)
+        collect_control_keys(M.config.controls[action.control], function(key)
             if not assigned[key] then
                 assigned[key] = true
-                table.insert(table_entries, { key = key, action = key_action(action) })
+                entries[#entries + 1] = { key = key, action = key_action(action_id) }
             end
 
             if #key == 1 and key:lower() == key then
@@ -675,14 +485,59 @@ local function build_key_table()
                 if upper ~= key and not reserved[upper] then
                     reserved[upper] = true
                     assigned[upper] = true
-                    table.insert(table_entries, { key = upper, action = key_action(action) })
+                    entries[#entries + 1] = { key = upper, action = key_action(action_id) }
                 end
             end
         end)
     end
 
-    table.insert(table_entries, { key = "Escape", action = key_action("quit") })
-    return table_entries
+    entries[#entries + 1] = { key = "Escape", action = key_action("quit") }
+    return entries
+end
+
+apply_action = function(window, pane, action_id)
+    local action = action_domain.get(action_id)
+    if not action then
+        return
+    end
+
+    local game = get_game(pane)
+
+    if action_id == "quit" then
+        game.state = nil
+        game.settled_signature = nil
+        pop_key_table(window, pane)
+        pane:send_text("\r\nBlackjack closed.\r\n")
+        return
+    end
+
+    if not action_domain.is_allowed(action_id, game.state) then
+        return
+    end
+
+    local next_state
+    local err
+
+    if action_id == "new" then
+        next_state, err = bj_transport.run_new(M.config, transport_deps)
+    else
+        next_state, err = bj_transport.run_action(M.config, transport_deps, action.cli_args, game.state)
+    end
+
+    if not next_state then
+        game.message = "Action unavailable: " .. (err or action_id)
+        render_to_pane(game, pane)
+        return
+    end
+
+    if action_id == "new" then
+        game.settled_signature = nil
+    end
+
+    game.state = next_state
+    game.message = nil
+    stats_store.record_finished_stats(game)
+    render_to_pane(game, pane)
 end
 
 local function command_palette_entries()
@@ -705,76 +560,36 @@ local function command_palette_entries()
     }
 end
 
-local function register_events()
-    if events_registered then
-        return
-    end
-    events_registered = true
-
-    wezterm.on(EVENT_ACTION, function(window, pane)
-        start_game(window, pane)
-    end)
-
-    wezterm.on(EVENT_RESET_STATS, function(window, pane)
+local register_events = wezterm_events.new({
+    wezterm = wezterm,
+    event_names = {
+        action = EVENT_ACTION,
+        health = EVENT_HEALTH,
+        reset_stats = EVENT_RESET_STATS,
+        user_var = USER_VAR,
+    },
+    start_game = start_game,
+    reset_stats = function()
         M.reset_stats()
-        local game = get_game(pane)
-        if game.state then
-            game.message = "Stats reset"
-            render_to_pane(game, pane)
-        elseif window.toast_notification then
-            window:toast_notification("Blackjack", "Stats reset", nil, 3000)
-        end
-    end)
-
-    wezterm.on(EVENT_HEALTH, function(window, pane)
-        local health = M.health_check()
-        local message
-        if health.ok then
-            message = "bj " .. (health.version or "installed")
-        else
-            message = "bj unavailable: " .. (health.error or "unknown error")
-        end
-
-        local game = get_game(pane)
-        if game.state then
-            game.message = message
-            render_to_pane(game, pane)
-        elseif window.toast_notification then
-            window:toast_notification("Blackjack", message, nil, 5000)
-        else
-            pane:send_text("\r\n" .. message .. "\r\n")
-        end
-    end)
-
-    wezterm.on("user-var-changed", function(window, pane, name, value)
-        if name == USER_VAR and value == M.config.trigger then
-            start_game(window, pane)
-        end
-    end)
-
-    wezterm.on("augment-command-palette", function()
-        if not M.config.command_palette then
-            return {}
-        end
-        return command_palette_entries()
-    end)
-end
-
-local function merge_options(opts)
-    for k, v in pairs(opts or {}) do
-        if type(v) == "table" and type(M.config[k]) == "table" then
-            for k2, v2 in pairs(v) do
-                M.config[k][k2] = v2
-            end
-        else
-            M.config[k] = v
-        end
-    end
-end
+    end,
+    get_game = get_game,
+    render_to_pane = render_to_pane,
+    health_check = function()
+        return M.health_check()
+    end,
+    get_trigger = function()
+        return M.config.trigger
+    end,
+    command_palette_enabled = function()
+        return M.config.command_palette
+    end,
+    command_palette_entries = command_palette_entries,
+})
 
 function M.apply_to_config(config, opts)
-    merge_options(opts)
-    load_persisted_stats()
+    config = config or {}
+    M.config = normalize_config(opts)
+    stats_store.load_persisted_stats()
     register_events()
 
     config.keys = config.keys or {}
@@ -782,11 +597,11 @@ function M.apply_to_config(config, opts)
     config.key_tables[KEY_TABLE] = build_key_table()
 
     if M.config.keybind then
-        table.insert(config.keys, {
+        config.keys[#config.keys + 1] = {
             key = M.config.keybind.key,
             mods = M.config.keybind.mods,
             action = wezterm.action.EmitEvent(EVENT_ACTION),
-        })
+        }
     end
 
     return config
@@ -813,13 +628,13 @@ function M.get_status_elements()
     }
 
     if stats.wins > 0 or stats.losses > 0 or stats.pushes > 0 then
-        table.insert(elements, { Foreground = { Color = "#9ece6a" } })
-        table.insert(elements, { Text = string.format("%dW ", stats.wins) })
-        table.insert(elements, { Foreground = { Color = "#f7768e" } })
-        table.insert(elements, { Text = string.format("%dL ", stats.losses) })
+        elements[#elements + 1] = { Foreground = { Color = "#9ece6a" } }
+        elements[#elements + 1] = { Text = string.format("%dW ", stats.wins) }
+        elements[#elements + 1] = { Foreground = { Color = "#f7768e" } }
+        elements[#elements + 1] = { Text = string.format("%dL ", stats.losses) }
         if stats.pushes > 0 then
-            table.insert(elements, { Foreground = { Color = "#e0af68" } })
-            table.insert(elements, { Text = string.format("%dP ", stats.pushes) })
+            elements[#elements + 1] = { Foreground = { Color = "#e0af68" } }
+            elements[#elements + 1] = { Text = string.format("%dP ", stats.pushes) }
         end
     end
 
@@ -828,37 +643,28 @@ end
 
 function M.get_stats(pane)
     if pane then
-        local stats = get_game(pane).stats
-        return { wins = stats.wins, losses = stats.losses, pushes = stats.pushes }
+        return stats_store.copy_stats(get_game(pane).stats)
     end
 
+    prune_stale_games()
     if M.config.stats.persist then
-        return copy_stats(load_persisted_stats())
+        return stats_store.copy_stats(stats_store.load_persisted_stats())
     end
 
-    local total = { wins = 0, losses = 0, pushes = 0 }
-    for _, game in pairs(pane_games) do
-        total.wins = total.wins + game.stats.wins
-        total.losses = total.losses + game.stats.losses
-        total.pushes = total.pushes + game.stats.pushes
-    end
-    return total
+    return stats_store.aggregate_stats(pane_games)
 end
 
 function M.reset_stats(pane)
     if pane then
-        get_game(pane).stats = { wins = 0, losses = 0, pushes = 0 }
+        get_game(pane).stats = stats_store.copy_stats(nil)
         return
     end
 
+    prune_stale_games()
     for _, game in pairs(pane_games) do
-        game.stats = { wins = 0, losses = 0, pushes = 0 }
+        game.stats = stats_store.copy_stats(nil)
     end
-
-    if M.config.stats.persist then
-        persisted_stats = { wins = 0, losses = 0, pushes = 0 }
-        save_persisted_stats()
-    end
+    stats_store.reset_persisted_stats()
 end
 
 local function parse_version(text)
@@ -908,18 +714,25 @@ function M.health_check()
         error = success and (version_ok and nil or ("bj must be >= " .. M.config.min_bj_version)) or stderr,
         key_table = KEY_TABLE,
         trigger_user_var = USER_VAR,
-        stats_path = stats_path(),
+        stats_path = stats_store.stats_path(),
     }
 end
 
 M._private = {
     render_game = render_game,
-    hand_value = hand_value,
-    settlement_signature = settlement_signature,
+    hand_value = state_domain.hand_value,
+    settlement_signature = function(state)
+        return state_domain.settlement_signature(state, wezterm.json_encode)
+    end,
     get_game = get_game,
-    record_finished_stats = record_finished_stats,
+    record_finished_stats = stats_store.record_finished_stats,
     parse_version = parse_version,
     compare_versions = compare_versions,
+    apply_action = apply_action,
+    build_key_table = build_key_table,
+    normalize_config = normalize_config,
+    validate_state_shape = state_domain.validate_state_shape,
+    prune_stale_games = prune_stale_games,
 }
 
 return M
