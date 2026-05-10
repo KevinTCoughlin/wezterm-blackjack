@@ -229,21 +229,35 @@ local function hand_value(cards)
 end
 
 local function card_text(card)
+    -- Full rank → display-label mapping for all 13 standard ranks.
+    -- Previously, Two–Nine fell through to `card.rank:sub(1, 1)`, which
+    -- produced silent collisions: Two/Three → "T", Four/Five → "F",
+    -- Six/Seven → "S". Players could not distinguish those cards on screen.
     local ranks = {
-        Ace = "A",
-        Jack = "J",
+        Ace   = "A",
+        Two   = "2",
+        Three = "3",
+        Four  = "4",
+        Five  = "5",
+        Six   = "6",
+        Seven = "7",
+        Eight = "8",
+        Nine  = "9",
+        Ten   = "10",
+        Jack  = "J",
         Queen = "Q",
-        King = "K",
-        Ten = "10",
+        King  = "K",
     }
     local suits = {
-        Spades = "♠",
-        Hearts = "♥",
+        Spades   = "♠",
+        Hearts   = "♥",
         Diamonds = "♦",
-        Clubs = "♣",
+        Clubs    = "♣",
     }
 
-    local rank = ranks[card.rank] or card.rank:sub(1, 1)
+    -- Fall back to the raw rank string so unknown engine values are visible
+    -- rather than silently truncated.
+    local rank = ranks[card.rank] or card.rank
     return rank .. (suits[card.suit] or "?")
 end
 
@@ -265,8 +279,22 @@ local function render_hand(cards)
     return table.concat(rendered, " ")
 end
 
+-- Count the number of terminal display columns occupied by `text`.
+--
+-- Strips ANSI SGR escape sequences first, then counts Unicode codepoints.
+-- Every codepoint is assumed to occupy exactly one column, which is correct
+-- for the card suit symbols (♠ ♥ ♦ ♣, all in the BMP, all narrow-width).
+-- This avoids the classic Lua pitfall where `#s` counts UTF-8 *bytes*, not
+-- characters — suit symbols are 3 bytes each, so a multi-card hand would
+-- otherwise produce a gap that is N×2 columns too small.
 local function display_len(text)
-    return #(text:gsub("\x1b%[[0-9;]*m", ""))
+    -- Remove every ANSI CSI SGR sequence (ESC [ … m).
+    local plain = text:gsub("\x1b%[[0-9;]*m", "")
+    -- Count codepoints: each leading byte of a UTF-8 sequence matches
+    -- 0xxxxxxx (ASCII) or 11xxxxxx (multi-byte lead). Continuation bytes
+    -- (10xxxxxx) are skipped by the negated character class.
+    local _, count = plain:gsub("[^\x80-\xBF]", "")
+    return count
 end
 
 local function fit(text, width)
@@ -559,7 +587,11 @@ local function apply_action(window, pane, action)
         if game.state.phase.type == "Insurance" then
             next_state, err = run_bj_with_state("insurance", game.state)
         else
-            next_state, err = run_bj({ "new" })
+            -- The decline key ("n") was pressed outside of an Insurance phase.
+            -- Previously this silently called run_bj({"new"}), discarding the
+            -- active hand with no confirmation. Do nothing instead — the key is
+            -- simply irrelevant in any other phase.
+            return
         end
     else
         next_state, err = run_bj_with_state(action, game.state)
@@ -569,6 +601,15 @@ local function apply_action(window, pane, action)
         game.message = "Action unavailable: " .. (err or action)
         render_to_pane(game, pane)
         return
+    end
+
+    -- Reset the duplicate-prevention sentinel before scoring the new state.
+    -- This mirrors the explicit reset in start_game and ensures that two
+    -- consecutive games with identical outcome signatures (e.g., back-to-back
+    -- dealer/player blackjacks) both get their stats recorded rather than the
+    -- second one being silently dropped.
+    if action == "new" then
+        game.settled_signature = nil
     end
 
     game.state = next_state
