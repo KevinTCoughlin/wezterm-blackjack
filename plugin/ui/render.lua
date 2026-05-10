@@ -1,5 +1,18 @@
 local M = {}
 
+local function load_wcwidth()
+    local ok, mod = pcall(require, "plugin.ui.wcwidth")
+    if ok then
+        return mod
+    end
+
+    local source = debug.getinfo(1, "S").source:gsub("^@", "")
+    local dir = source:match("(.*/)") or "./"
+    return dofile(dir .. "wcwidth.lua")
+end
+
+local wcwidth = load_wcwidth()
+
 local colors = {
     reset = "\x1b[0m",
     dim = "\x1b[2m",
@@ -64,8 +77,7 @@ end
 
 local function display_len(text)
     local plain = text:gsub("\x1b%[[0-9;]*m", "")
-    local _, count = plain:gsub("[^\x80-\xBF]", "")
-    return count
+    return wcwidth.wcswidth(plain)
 end
 
 local function fit(text, width)
@@ -78,7 +90,12 @@ local function fit(text, width)
     end
 
     local plain = text:gsub("\x1b%[[0-9;]*m", "")
-    return plain:sub(1, math.max(0, width - 1)) .. "…"
+    local ellipsis = "…"
+    local ellipsis_width = wcwidth.wcswidth(ellipsis)
+    if width <= ellipsis_width then
+        return wcwidth.truncate(plain, width)
+    end
+    return wcwidth.truncate(plain, width - ellipsis_width) .. ellipsis
 end
 
 local function row(left, right_text)

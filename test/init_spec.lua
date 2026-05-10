@@ -66,6 +66,7 @@ package.preload["wezterm"] = function()
 end
 
 local blackjack = dofile("plugin/init.lua")
+local wcwidth = dofile("plugin/ui/wcwidth.lua")
 
 local function assert_equal(actual, expected, label)
     if actual ~= expected then
@@ -126,6 +127,11 @@ local state = {
 }
 
 assert_equal(blackjack._private.hand_value(state.player_hands[1].cards), 21, "soft hand value")
+assert_equal(wcwidth.wcswidth("A♠"), 2, "wcwidth handles suit symbols")
+assert_equal(wcwidth.wcswidth("你"), 2, "wcwidth handles wide CJK")
+assert_equal(wcwidth.wcswidth("e" .. string.char(0xCC, 0x81)), 1, "wcwidth handles combining marks")
+assert_equal(wcwidth.truncate("你A", 2), "你", "truncate keeps whole wide chars")
+assert_equal(wcwidth.truncate("你A", 3), "你A", "truncate returns full text when it fits")
 assert_equal(
     blackjack._private.compare_versions(
         blackjack._private.parse_version("bj 0.1.1"),

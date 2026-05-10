@@ -209,6 +209,7 @@ The plugin is organized into focused modules:
 - `plugin/domain/state.lua` - Hand scoring and strict game-state validation
 - `plugin/transport/bj.lua` - CLI transport (`bj` argv/stdin/stdout boundary)
 - `plugin/ui/render.lua` - Pure terminal UI rendering
+- `plugin/ui/wcwidth.lua` - Vendored Unicode display-width helper (wcwidth/wcswidth)
 - `plugin/stats/store.lua` - In-memory/persisted stats management
 - `plugin/wezterm/events.lua` - WezTerm event wiring
 
