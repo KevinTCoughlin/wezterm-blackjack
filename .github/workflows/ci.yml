@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install bj CLI
-        run: cargo install --git https://github.com/KevinTCoughlin/blackjack --locked --force
+        run: cargo install --git https://github.com/KevinTCoughlin/blackjack --rev 819817807a12d77059474c7addbdc9c144a0152e --locked --force
 
       - name: Verify bj JSON contract
         run: test/bj-contract.sh
