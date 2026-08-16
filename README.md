@@ -103,7 +103,7 @@ blackjack.apply_to_config(config, {
         path = nil,              -- Defaults to ~/.local/state/wezterm-blackjack/stats.json
     },
     status_bar = {
-        enabled = true,          -- Show in status bar
+        enabled = false,         -- Set true to show in status bar
         icon = "BJ",             -- Icon to display
         color = "#9ece6a",       -- Icon color
     },
@@ -216,10 +216,13 @@ The plugin is organized into focused modules:
 This split keeps rendering, transport, and domain logic independently testable,
 with explicit validation at the CLI boundary before state reaches UI/actions.
 
-Run the local smoke check with a WezTerm config load:
+Run the Lua tests, syntax checks, shell lint, and WezTerm config smoke check:
 
 ```bash
-/Applications/WezTerm.app/Contents/MacOS/wezterm --config-file test/wezterm-smoke.lua show-keys
+lua test/init_spec.lua
+find plugin test -name '*.lua' -exec luac -p {} +
+shellcheck test/bj-contract.sh
+wezterm --config-file test/wezterm-smoke.lua show-keys >/dev/null
 ```
 
 CI runs the Lua test harness in `test/init_spec.lua` and a real `bj` JSON

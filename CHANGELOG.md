@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Prevent duplicate win/loss/push accounting for the same finished game state.
 - Avoid leaking in-game key presses to the underlying shell while a game is active.
+- Use documented WezTerm child-process APIs while safely forwarding game state to `bj`,
+  including Base64-encoding all dynamic values before constructing the Windows adapter.
+- Count surrendered hands as losses and avoid labeling split 21s as natural blackjacks.
+- Reject malformed CLI state before rendering it and sanitize subprocess errors.
+- Reset omitted options to documented defaults when configuration is reapplied.
 
 ## [0.1.0] - 2025-01-18
 

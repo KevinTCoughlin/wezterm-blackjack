@@ -112,7 +112,7 @@ local function outcome_color(outcome)
     if outcome == "Win" or outcome == "Blackjack" then
         return "green"
     end
-    if outcome == "Lose" or outcome == "Bust" then
+    if outcome == "Lose" or outcome == "Bust" or outcome == "Surrender" then
         return "red"
     end
     return "yellow"
@@ -222,7 +222,7 @@ function M.render_game(game, opts)
         local value = state_domain.hand_value(cards)
         local status
 
-        if value == 21 and #cards == 2 then
+        if value == 21 and #cards == 2 and not hand.is_split then
             status = colorize(colors_enabled, "BLACKJACK!", "green")
         elseif value > 21 then
             status = colorize(colors_enabled, "BUST!", "red")

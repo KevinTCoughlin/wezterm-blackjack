@@ -25,18 +25,6 @@ function M.safe_run(cmd)
     return wezterm.run_child_process(cmd)
 end
 
-function M.safe_run_with_stdin(cmd, stdin)
-    if type(cmd) == "string" then
-        error("safe_run_with_stdin() requires array form")
-    end
-
-    if M.debug_mode then
-        M.log("running with stdin: " .. table.concat(cmd, " "), "DEBUG")
-    end
-
-    return wezterm.run_child_process(cmd, stdin)
-end
-
 function M.dirname(path)
     if type(path) ~= "string" then
         return nil
@@ -130,6 +118,17 @@ function M.split_args(str)
     end
 
     return args
+end
+
+function M.sanitize_terminal_text(value)
+    local text = tostring(value or "")
+    text = text:gsub("[%z\1-\31\127]", function(ch)
+        if ch == "\t" or ch == "\r" or ch == "\n" then
+            return " "
+        end
+        return ""
+    end)
+    return text:gsub("%s+", " "):match("^%s*(.-)%s*$")
 end
 
 function M.safe_json_parse(str)

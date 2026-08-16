@@ -1,10 +1,18 @@
 local M = {}
 
+local function stat_count(value)
+    value = tonumber(value)
+    if not value or value ~= value or value == math.huge or value == -math.huge or value < 0 then
+        return 0
+    end
+    return math.floor(value)
+end
+
 local function copy_stats(stats)
     return {
-        wins = tonumber(stats and stats.wins) or 0,
-        losses = tonumber(stats and stats.losses) or 0,
-        pushes = tonumber(stats and stats.pushes) or 0,
+        wins = stat_count(stats and stats.wins),
+        losses = stat_count(stats and stats.losses),
+        pushes = stat_count(stats and stats.pushes),
     }
 end
 
@@ -94,7 +102,7 @@ function M.new(deps)
         for _, outcome in ipairs(game.state.outcomes or {}) do
             if outcome.outcome == "Win" or outcome.outcome == "Blackjack" then
                 delta.wins = delta.wins + 1
-            elseif outcome.outcome == "Lose" or outcome.outcome == "Bust" then
+            elseif outcome.outcome == "Lose" or outcome.outcome == "Bust" or outcome.outcome == "Surrender" then
                 delta.losses = delta.losses + 1
             elseif outcome.outcome == "Push" then
                 delta.pushes = delta.pushes + 1
