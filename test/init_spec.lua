@@ -57,6 +57,9 @@ package.preload["wezterm"] = function()
             events[name] = fn
         end,
         run_child_process = function(argv, stdin)
+            if stdin ~= nil then
+                error("run_child_process uses documented single-argument API")
+            end
             return run_child_process_handler(argv, stdin)
         end,
         target_triple = "x86_64-unknown-linux-gnu",
@@ -67,6 +70,7 @@ end
 
 local blackjack = dofile("plugin/init.lua")
 local wcwidth = dofile("plugin/ui/wcwidth.lua")
+local bj_transport = dofile("plugin/transport/bj.lua")
 
 local function assert_equal(actual, expected, label)
     if actual ~= expected then
@@ -102,6 +106,12 @@ local function pane_stub(id)
         _sink = sink,
     }
 end
+
+assert_equal(bj_transport._private.base64_encode(""), "", "Base64 encodes empty input")
+assert_equal(bj_transport._private.base64_encode("f"), "Zg==", "Base64 encodes one byte")
+assert_equal(bj_transport._private.base64_encode("fo"), "Zm8=", "Base64 encodes two bytes")
+assert_equal(bj_transport._private.base64_encode("foo"), "Zm9v", "Base64 encodes three bytes")
+assert_equal(bj_transport._private.base64_encode("♠\n'&"), "4pmgCicm", "Base64 encodes UTF-8 and metacharacters")
 
 local window_stub = {
     perform_action = function() end,
@@ -172,6 +182,16 @@ assert_truthy(output:find("Action unavailable", 1, true), "render includes inlin
 assert_truthy(output:find("[2♠]", 1, true), "render includes Two as 2")
 assert_truthy(output:find("[3♦]", 1, true), "render includes Three as 3")
 
+game.state.player_hands[1] = {
+    cards = {
+        { rank = "Ace", suit = "Spades" },
+        { rank = "King", suit = "Hearts" },
+    },
+    is_split = true,
+}
+output = blackjack._private.render_game(game)
+assert_falsy(output:find("BLACKJACK!", 1, true), "split 21 is not labeled blackjack")
+
 game.state = {
     dealer_hand = state.dealer_hand,
     player_hands = state.player_hands,
@@ -187,6 +207,13 @@ blackjack._private.record_finished_stats(game)
 assert_equal(game.stats.wins, 1, "finished win counted once")
 assert_equal(game.stats.pushes, 1, "finished push counted once")
 
+game.state.outcomes = {
+    { outcome = "Surrender", payout = -0.5 },
+}
+game.settled_signature = nil
+blackjack._private.record_finished_stats(game)
+assert_equal(game.stats.losses, 1, "surrender counted as loss")
+
 local pane = pane_stub(101)
 local pane_game = blackjack._private.get_game(pane)
 pane_game.state = state
@@ -201,6 +228,75 @@ end)
 
 blackjack._private.apply_action(window_stub, pane, "insurance-decline")
 assert_equal(call_count, 0, "decline outside Insurance does not invoke bj")
+
+local encoded_player_state = wezterm_stub.json_encode(state)
+set_child_process_handler(function(argv)
+    assert_equal(argv[1], "sh", "Unix action uses shell stdin adapter")
+    assert_equal(argv[5], encoded_player_state, "state is passed as an inert argument")
+    assert_equal(argv[6], "bj", "configured executable is passed separately")
+    assert_equal(argv[7], "stand", "action is passed separately")
+    return true, encoded_player_state, ""
+end)
+blackjack._private.apply_action(window_stub, pane, "stand")
+
+set_child_process_handler(function()
+    return false, "", "\27[2Jbad\nline"
+end)
+blackjack._private.apply_action(window_stub, pane, "hit")
+assert_falsy(pane._sink[#pane._sink]:find("\27[2J", 1, true), "subprocess errors cannot inject terminal escapes")
+
+local windows_argv
+local hostile_json = "{\"note\":\"'\\\"; Write-Output PWNED`n$(Get-ChildItem)&|\\r\\n\"}"
+local hostile_path = "C:\\Program Files\\bj'; Write-Output PWNED &.exe\r\n"
+local hostile_action = "stand'; Write-Output PWNED | % { $_ }\n"
+local windows_state = bj_transport.run_action(
+    { bj_path = hostile_path },
+    {
+        target_triple = "aarch64-pc-windows-msvc",
+        state_domain = {
+            validate_state_shape = function()
+                return true
+            end,
+        },
+        utils = {
+            safe_json_encode = function()
+                return hostile_json
+            end,
+            safe_json_parse = function()
+                return state
+            end,
+            safe_run = function(argv)
+                windows_argv = argv
+                return true, "state", ""
+            end,
+        },
+    },
+    { hostile_action },
+    state
+)
+assert_equal(windows_state, state, "Windows adapter returns parsed state")
+assert_equal(windows_argv[1], "powershell.exe", "Windows action uses PowerShell stdin adapter")
+assert_equal(#windows_argv, 6, "Windows adapter passes only a fixed encoded script")
+assert_falsy(windows_argv[6]:find(hostile_json, 1, true), "JSON is not embedded as PowerShell source")
+assert_falsy(windows_argv[6]:find(hostile_path, 1, true), "executable path is not embedded as PowerShell source")
+assert_falsy(windows_argv[6]:find(hostile_action, 1, true), "action is not embedded as PowerShell source")
+assert_truthy(
+    windows_argv[6]:find(bj_transport._private.base64_encode(hostile_json), 1, true),
+    "Windows adapter includes the encoded JSON"
+)
+assert_truthy(
+    windows_argv[6]:find(bj_transport._private.base64_encode(hostile_path), 1, true),
+    "Windows adapter includes the encoded executable path"
+)
+assert_truthy(
+    windows_argv[6]:find(bj_transport._private.base64_encode(hostile_action), 1, true),
+    "Windows adapter includes the encoded action"
+)
+assert_truthy(
+    windows_argv[6]:match("^%$state = %[Text%.Encoding%]::UTF8%.GetString"),
+    "Windows adapter starts with a fixed decoder expression"
+)
+assert_falsy(windows_argv[6]:find("$args", 1, true), "Windows adapter does not evaluate trailing command arguments")
 
 local finished_state = {
     dealer_hand = state.dealer_hand,
@@ -233,6 +329,14 @@ local invalid_state_ok, invalid_state_err = blackjack._private.validate_state_sh
 assert_falsy(invalid_state_ok, "invalid state rejected")
 assert_truthy(type(invalid_state_err) == "string" and invalid_state_err ~= "", "invalid state has reason")
 
+local unsafe_state = {
+    dealer_hand = { cards = { { rank = "\27[2J", suit = "Hearts" } } },
+    player_hands = {},
+    phase = { type = "Finished" },
+    outcomes = {},
+}
+assert_falsy(blackjack._private.validate_state_shape(unsafe_state), "unsafe card values rejected")
+
 local bad_opts_ok = pcall(function()
     blackjack._private.normalize_config({ controls = { nope = "x" } })
 end)
@@ -247,6 +351,10 @@ local normalized = blackjack._private.normalize_config({
 assert_equal(normalized.keybind, false, "keybind false accepted")
 assert_equal(type(normalized.controls.hit), "table", "multi control normalized to list")
 assert_equal(#normalized.controls.hit, 2, "duplicate control keys deduplicated")
+
+blackjack.config.colors = false
+local reset_normalized = blackjack._private.normalize_config({})
+assert_equal(reset_normalized.colors, true, "normalization starts from documented defaults")
 
 set_child_process_handler(function()
     return false, "", "missing bj"
@@ -268,5 +376,6 @@ assert_equal(#palette, 3, "command palette entries installed")
 local health = blackjack.health_check()
 assert_equal(health.ok, false, "health reports missing bj")
 assert_equal(health.bj_path, "bj", "health reports bj path")
+assert_falsy(health.error:find("\27", 1, true), "health errors are terminal-safe")
 
 print("ok")

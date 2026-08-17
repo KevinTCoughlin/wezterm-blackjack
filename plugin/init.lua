@@ -96,6 +96,7 @@ local pane_games = {}
 local transport_deps = {
     utils = utils,
     state_domain = state_domain,
+    target_triple = wezterm.target_triple,
 }
 
 local stats_store = stats_store_module.new({
@@ -254,7 +255,7 @@ local function normalize_config(opts)
         assert_known_keys(opts.keybind, KEYBIND_KEYS, "keybind")
     end
 
-    local merged = merge_tables(M.config, opts)
+    local merged = merge_tables(DEFAULT_CONFIG, opts)
     local normalized = {
         trigger = require_non_empty_string(merged.trigger, "trigger"),
         keybind = normalize_keybind(merged.keybind),
@@ -419,10 +420,10 @@ local function start_game(window, pane)
     local game = get_game(pane)
     local state, err = bj_transport.run_new(M.config, transport_deps)
     if not state then
-        pane:send_text("\r\nBlackjack failed to start using '" .. M.config.bj_path .. "'.\r\n")
+        pane:send_text("\r\nBlackjack failed to start using '" .. utils.sanitize_terminal_text(M.config.bj_path) .. "'.\r\n")
         pane:send_text("Install with: cargo install blackjack\r\n")
         if err and err ~= "" then
-            pane:send_text("bj error: " .. err .. "\r\n")
+            pane:send_text("bj error: " .. utils.sanitize_terminal_text(err) .. "\r\n")
         end
         return
     end
@@ -525,7 +526,7 @@ apply_action = function(window, pane, action_id)
     end
 
     if not next_state then
-        game.message = "Action unavailable: " .. (err or action_id)
+        game.message = "Action unavailable: " .. utils.sanitize_terminal_text(err or action_id)
         render_to_pane(game, pane)
         return
     end
@@ -702,7 +703,15 @@ function M.health_check()
     local success, stdout, stderr = wezterm.run_child_process({ M.config.bj_path, "--version" })
     local version = parse_version(stdout)
     local minimum = parse_version(M.config.min_bj_version)
-    local version_ok = success and (not minimum or not version or compare_versions(version, minimum) >= 0)
+    local version_ok = success and version ~= nil and (not minimum or compare_versions(version, minimum) >= 0)
+    local error_message
+    if not success then
+        error_message = utils.sanitize_terminal_text(stderr or stdout or "unknown error")
+    elseif not version then
+        error_message = "unable to determine bj version"
+    elseif not version_ok then
+        error_message = "bj must be >= " .. M.config.min_bj_version
+    end
 
     return {
         ok = success and version_ok,
@@ -711,7 +720,7 @@ function M.health_check()
         detected_version = version and version.raw or nil,
         min_version = M.config.min_bj_version,
         version_ok = version_ok,
-        error = success and (version_ok and nil or ("bj must be >= " .. M.config.min_bj_version)) or stderr,
+        error = error_message,
         key_table = KEY_TABLE,
         trigger_user_var = USER_VAR,
         stats_path = stats_store.stats_path(),

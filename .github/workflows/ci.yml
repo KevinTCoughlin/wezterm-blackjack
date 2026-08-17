@@ -5,24 +5,35 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Install Lua
-        run: sudo apt-get update && sudo apt-get install -y lua5.4
+      - name: Install validation tools
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 shellcheck
 
       - name: Run plugin tests
         run: lua5.4 test/init_spec.lua
 
+      - name: Check Lua syntax
+        run: find plugin test -name '*.lua' -exec luac5.4 -p {} +
+
+      - name: Lint shell tests
+        run: shellcheck test/bj-contract.sh
+
   bj-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Install bj CLI
         run: cargo install --git https://github.com/KevinTCoughlin/blackjack --rev 819817807a12d77059474c7addbdc9c144a0152e --locked --force
