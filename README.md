@@ -1,3 +1,6 @@
+> [!NOTE]
+> **Archived.** This plugin is no longer maintained. It still works as-is with the `bj` CLI, but will not receive updates.
+
 # wezterm-blackjack
 
 Play blackjack in your terminal with WezTerm.
